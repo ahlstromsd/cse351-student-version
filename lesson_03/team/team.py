@@ -32,9 +32,11 @@ TODO
 
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import threading
 from common import *
+from queue import Queue
 
 # Include cse 351 common Python files
 from cse351 import *
@@ -42,15 +44,35 @@ from cse351 import *
 # global
 call_count = 0
 
-def get_urls(film6, kind):
+class ReadURL(threading.Thread):
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+        self.name = ""
+    
+    def get_name(self):
+        return self.name
+
+    def run(self):
+
+        item = get_data_from_server(self.url)
+        self.name = item['name']
+
+def readurl(url):
+    
+    item = get_data_from_server(url)
+    return item['name']
+
+def get_urls(film6, kind, q):
     global call_count
 
     urls = film6[kind]
     print(kind)
     for url in urls:
         call_count += 1
-        item = get_data_from_server(url)
-        print(f'  - {item['name']}')
+        # item = get_data_from_server(url)
+        # print(f'  - {item['name']}')
+        q.put(url)
 
 def main():
     global call_count
@@ -62,12 +84,35 @@ def main():
     call_count += 1
     print_dict(film6)
 
+    q = Queue()
+    threads = []
+
     # Retrieve people
-    get_urls(film6, 'characters')
-    get_urls(film6, 'planets')
-    get_urls(film6, 'starships')
-    get_urls(film6, 'vehicles')
-    get_urls(film6, 'species')
+    get_urls(film6, 'characters',q)
+    get_urls(film6, 'planets',q)
+    get_urls(film6, 'starships',q)
+    get_urls(film6, 'vehicles',q)
+    get_urls(film6, 'species',q)
+    q.put(None)
+
+    executor = ThreadPoolExecutor(max_workers=10)
+    with executor as ex:
+        while True:
+            url = q.get()
+            if url is None:
+                break
+            executor.map(readurl, url)
+
+    # while True:
+    #     if q.get() is None:
+    #         break
+    #     t = ReadURL(q.get())
+    #     threads.append(t)
+    #     t.start()
+    
+    # for t in threads:
+    #     t.join()
+    #     print(f'  - {t.get_name()}')
 
     log.stop_timer('Total Time To complete')
     log.write(f'There were {call_count} calls to the server')
