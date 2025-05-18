@@ -1,7 +1,7 @@
 """
 Course    : CSE 351
 Assignment: 04
-Student   : <your name here>
+Student   : Sydney Ahlstrom
 
 Instructions:
     - review instructions in the course
@@ -18,34 +18,80 @@ recno: record number starting from 0
 """
 
 import time
+import threading
+import queue
 from common import *
 
 from cse351 import *
 
-THREADS = 0                 # TODO - set for your program
+THREADS = 5
+# TODO - set for your program
 WORKERS = 10
 RECORDS_TO_RETRIEVE = 5000  # Don't change
 
 
 # ---------------------------------------------------------------------------
-def retrieve_weather_data():
+def retrieve_weather_data(request_queue, worker_queue, stop_event):
     # TODO - fill out this thread function (and arguments)
-    ...
+    while not stop_event.is_set():
+        try:
+            # Get the next request from the queue
+            city, recno = request_queue.get(timeout=1)
+            if city == "DONE":
+                worker_queue.put(("DONE", None, None))
+                request_queue.put(("DONE", None))
+                break
+            url = f'{TOP_API_URL}/record/{city}/{recno}'
+            data = get_data_from_server(url)
+            if data and 'date' in data and 'temp' in data:
+                worker_queue.put((city, data['date'], data['temp']))
+            request_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"Error retrieve_weather_data: {e}")
+            
 
-
-# ---------------------------------------------------------------------------
 # TODO - Create Worker threaded class
+class Worker(threading.Thread):
+    def __init__(self, worker_queue, noaa, stop_event):
+        super().__init__()
+        self.worker_queue = worker_queue
+        self.noaa = noaa
+        self.stop_event = stop_event
 
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                city, date, temp = self.worker_queue.get(timeout=1)
+                if city == "DONE":
+                    self.worker_queue.put(("DONE", None, None))
+                    break
+                self.noaa.store_data(city, date, temp)
+                self.worker_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error in Worker: {e}")
 
 # ---------------------------------------------------------------------------
 # TODO - Complete this class
 class NOAA:
 
     def __init__(self):
-        ...
+        self.data = {city: [] for city in CITIES}
+        self.lock = threading.Lock()
+
+    def store_data(self, city, date, temp):
+        with self.lock:
+            self.data[city].append((date, temp))
 
     def get_temp_details(self, city):
-        return 0.0
+        with self.lock:
+            if not self.data[city]:
+                return 0
+            total_temp = sum(temp for _, temp in self.data[city])
+            return total_temp / len(self.data[city])
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +118,7 @@ def verify_noaa_results(noaa):
         avg = noaa.get_temp_details(name)
 
         if abs(avg - answer) > 0.00001:
-            msg = f'FAILED  Expected {answer}'
+            msg = f'FAILED  Excepted {answer}'
         else:
             msg = f'PASSED'
         print(f'{name:>15}: {avg:<10} {msg}')
@@ -89,6 +135,10 @@ def main():
 
     # Start server
     data = get_data_from_server(f'{TOP_API_URL}/start')
+    if data is None:
+        print('Server not started')
+        log.stop_timer('Run time: ')
+        return
 
     # Get all cities number of records
     print('Retrieving city details')
@@ -104,8 +154,49 @@ def main():
     records = RECORDS_TO_RETRIEVE
 
     # TODO - Create any queues, pipes, locks, barriers you need
+    request_queue = queue.Queue(maxsize=10)
+    worker_queue = queue.Queue(maxsize=10)
+    stop_event = threading.Event()
 
+    retriever_threads = []
+    for _ in range(THREADS):
+        t = threading.Thread(target=retrieve_weather_data, args=(request_queue, worker_queue, stop_event))
+        t.start()
+        retriever_threads.append(t)
 
+    worker_threads = []
+    for _ in range(WORKERS):
+        w = Worker(worker_queue, noaa, stop_event)
+        w.start()
+        worker_threads.append(w)
+
+    for city in CITIES:
+        for recno in range(records):
+            request_queue.put((city, recno))
+
+    request_queue.put(("DONE", None))
+
+    request_queue.join()
+
+    stop_event.set()
+
+    for t in retriever_threads:
+        t.join()
+
+    worker_queue.join()
+
+    for w in worker_threads:
+        w.join()
+
+    data = get_data_from_server(f'{TOP_API_URL}/end')
+    if data is None:
+        print('Server not started')
+    else:
+        print(data)
+
+    verify_noaa_results(noaa)
+
+    log.stop_timer('Run time: ')
 
 
     # End server - don't change below
