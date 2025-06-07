@@ -1,7 +1,10 @@
 """
 Course: CSE 351
 Assignment: 06
-Author: [Your Name]
+Author: Sydney Ahlstrom
+
+Justification:
+I used a fully parallelized image processing pipeline with multiprocessing and queues, it processes all images from the faces folder to the step3_edges folder, and should follow the program diagram and rubric. I met all the requirements, and tried to make the code efficient.
 
 Instructions:
 
@@ -16,11 +19,14 @@ import numpy as np
 
 from cse351 import *
 
+print(f"Current Working Directory: {os.getcwd()}")
+
+SCRIPT_DIR= os.path.dirname(os.path.abspath(__file__))
+
 # Folders
-INPUT_FOLDER = "faces"
-STEP1_OUTPUT_FOLDER = "step1_smoothed"
-STEP2_OUTPUT_FOLDER = "step2_grayscale"
-STEP3_OUTPUT_FOLDER = "step3_edges"
+INPUT_FOLDER = os.path.join(SCRIPT_DIR,"faces")
+
+STEP3_OUTPUT_FOLDER = os.path.join(SCRIPT_DIR, "step3_edges")
 
 # Parameters for image processing
 GAUSSIAN_BLUR_KERNEL_SIZE = (5, 5)
@@ -102,6 +108,45 @@ def process_images_in_folder(input_folder,              # input folder with imag
     print(f"Finished processing. {processed_count} images processed into '{output_folder}'.")
 
 # ---------------------------------------------------------------------------
+def smooth_worker(input_q, output_q, kernel_size):
+    while True:
+        item = input_q.get()
+        if item is None:
+            output_q.put(None)
+            break
+        filename, img = item
+        try:
+            smoothed = task_smooth_image(img, kernel_size)
+            output_q.put((filename, smoothed))
+        except Exception as e:
+            print(f"Error smoothing {filename}: {e}")
+
+def grayscale_worker(input_q, output_q):
+    while True:
+        item = input_q.get()
+        if item is None:
+            output_q.put(None)
+            break
+        filename, img = item
+        try:
+            gray = task_convert_to_grayscale(img)
+            output_q.put((filename, gray))
+        except Exception as e:
+            print(f"Error grayscale {filename}: {e}")
+
+def edge_worker(input_q, output_folder, threshold1, threshold2):
+    while True:
+        item = input_q.get()
+        if item is None:
+            break
+        filename, img = item
+        try:
+            edges = task_detect_edges(img, threshold1, threshold2)
+            out_path = os.path.join(output_folder, filename)
+            cv2.imwrite(out_path, edges)
+        except Exception as e:
+            print(f"Error edge {filename}: {e}")
+
 def run_image_processing_pipeline():
     print("Starting image processing pipeline...")
 
@@ -112,22 +157,61 @@ def run_image_processing_pipeline():
     # - you are free to change anything in the program as long as you
     #   do all requirements.
 
-    # --- Step 1: Smooth Images ---
-    process_images_in_folder(INPUT_FOLDER, STEP1_OUTPUT_FOLDER, task_smooth_image,
-                             processing_args=(GAUSSIAN_BLUR_KERNEL_SIZE,))
+    create_folder_if_not_exists(STEP3_OUTPUT_FOLDER)
 
-    # --- Step 2: Convert to Grayscale ---
-    process_images_in_folder(STEP1_OUTPUT_FOLDER, STEP2_OUTPUT_FOLDER, task_convert_to_grayscale)
+    # Number of processes per stage
+    N_SMOOTH = 2
+    N_GRAY = 2
+    N_EDGE = 2
 
-    # --- Step 3: Detect Edges ---
-    process_images_in_folder(STEP2_OUTPUT_FOLDER, STEP3_OUTPUT_FOLDER, task_detect_edges,
-                             load_args=cv2.IMREAD_GRAYSCALE,        
-                             processing_args=(CANNY_THRESHOLD1, CANNY_THRESHOLD2))
+    # Queues for pipeline
+    q1 = mp.Queue(maxsize=32)
+    q2 = mp.Queue(maxsize=32)
+    q3 = mp.Queue(maxsize=32)
+
+    # Start worker processes
+    smoothers = [mp.Process(target=smooth_worker, args=(q1, q2, GAUSSIAN_BLUR_KERNEL_SIZE)) for _ in range(N_SMOOTH)]
+    grays = [mp.Process(target=grayscale_worker, args=(q2, q3)) for _ in range(N_GRAY)]
+    edges = [mp.Process(target=edge_worker, args=(q3, STEP3_OUTPUT_FOLDER, CANNY_THRESHOLD1, CANNY_THRESHOLD2)) for _ in range(N_EDGE)]
+
+    for p in smoothers + grays + edges:
+        p.start()
+
+    # Main process: read images and enqueue to q1
+    files = [f for f in os.listdir(INPUT_FOLDER) if os.path.splitext(f)[1].lower() in ALLOWED_EXTENSIONS]
+    total = len(files)
+    for filename in files:
+        img_path = os.path.join(INPUT_FOLDER, filename)
+        img = cv2.imread(img_path)
+        if img is not None:
+            q1.put((filename, img))
+        else:
+            print(f"Warning: Could not read image '{img_path}'. Skipping.")
+
+    # Send sentinels to smoothers
+    for _ in range(N_SMOOTH):
+        q1.put(None)
+    # Wait for smoothers to finish and propagate sentinels to grays
+    for _ in range(N_SMOOTH):
+        q2.get()  # Each smoother puts a None
+
+    # Send sentinels to grays
+    for _ in range(N_GRAY):
+        q2.put(None)
+    # Wait for grays to finish and propagate sentinels to edges
+    for _ in range(N_GRAY):
+        q3.get()  # Each gray puts a None
+
+    # Send sentinels to edges
+    for _ in range(N_EDGE):
+        q3.put(None)
+
+    # Join all workers
+    for p in smoothers + grays + edges:
+        p.join()
 
     print("\nImage processing pipeline finished!")
     print(f"Original images are in: '{INPUT_FOLDER}'")
-    print(f"Grayscale images are in: '{STEP1_OUTPUT_FOLDER}'")
-    print(f"Smoothed images are in: '{STEP2_OUTPUT_FOLDER}'")
     print(f"Edge images are in: '{STEP3_OUTPUT_FOLDER}'")
 
 
